@@ -1,5 +1,8 @@
 # brewrobot-tap-weight
-Application for measuring tapped beers using ESP32, cheap scale and HX711 with integration to Home Assistant.
+Application for measuring tapped beers using ESP32, cheap scale and HX711 with integration to Home Assistant using MQTT. Application supports automatic integration to HA.
+
+![Display image](https://brewrobot.org/img/projects/brewrobot-tap-weight/display.png)
+![Wiring image](https://brewrobot.org/img/projects/brewrobot-tap-weight/wiring.png)
 
 ## Required libs
 
