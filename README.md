@@ -3,6 +3,8 @@ Application for measuring tapped beers using ESP32, cheap scale and HX711 with i
 
 The buttons on the TTGO are used to reset the stored weight (in case of power loss) and to tare.
 
+The scale has to be calibrated before the use! Calibration is not directly supported yet, but you can use any available [example](https://raw.githubusercontent.com/RuiSantosdotme/Random-Nerd-Tutorials/master/Projects/Arduino/Arduino_Load_Cell/Arduino_Calibrate_Load_Cell.ino).
+
 ![Display image](https://brewrobot.org/img/projects/brewrobot-tap-weight/display.png)
 ![Wiring image](https://brewrobot.org/img/projects/brewrobot-tap-weight/wiring.png)
 
