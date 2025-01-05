@@ -229,6 +229,7 @@ bool send_device_registration() {
     return false;
   String registration_json = R"({
    "device_class":"weight",
+   "state_class":"measurement",
    "state_topic":"homeassistant/sensor/XXX/state",
    "unit_of_measurement":"kg",
    "value_template":"{{ value_json.weight }}",
