@@ -396,10 +396,14 @@ void loop() {
     }
     unsigned long current_time = millis();
     if ((current_time - last_change_sync >= weight_change_sync) && measurement_send) {
+      mqtt_state = lcd_logo_type::SYNC;
+      update_lcd_conn_graphics();
       measurement_send = !send_device_state(rounded_weight);
       last_change_sync = current_time;
     }
     if (current_time - last_change_sync >= weight_regular_sync) {
+      mqtt_state = lcd_logo_type::SYNC;
+      update_lcd_conn_graphics();
       send_device_state(rounded_weight);
       last_change_sync = current_time;
     }
