@@ -4,26 +4,37 @@
 #include <Preferences.h>
 #include "HX711.h"
 #include "beer.h"
+#include "wifi_online.h"
+#include "wifi_offline.h"
+#include "wifi_sync.h"
+#include "mqtt_online.h"
+#include "mqtt_offline.h"
+#include "mqtt_sync.h"
+
 
 /*
  * Base constants
  */
 
 // Wifi settings
-const char* ssid           = ""; // REQUIRED - WiFi SSID
-const char* password       = ""; // REQUIRED - WiFi password
+const char* ssid                   = "";              // REQUIRED - WiFi SSID
+const char* password               = "";              // REQUIRED - WiFi password
+const unsigned long reconnect_time = 60000;           // Try to reconnect every 60s
 
 // MQTT broker settings
-const char *mqtt_broker    = ""; // REQUIRED - MQTT broker IP address
-const char *mqtt_username  = ""; // REQUIRED - MQTT broker user
-const char *mqtt_password  = ""; // REQUIRED - MQTT broker password
-const char *mqtt_device    = "beerWeight";
-const char *mqtt_base_addr = "homeassistant/sensor/";
-const int mqtt_port = 1883;
+const char *mqtt_broker            = "";              // REQUIRED - MQTT broker IP address
+const char *mqtt_username          = "";              // REQUIRED - MQTT broker user
+const char *mqtt_password          = "";              // REQUIRED - MQTT broker password
+const char *mqtt_device            = "beerWeight";
+const char *mqtt_base_addr         = "homeassistant/sensor/";
+const int mqtt_port                = 1883;
 
 // Sync settings
-const int weight_change_sync  = 15;    // Sync every 60s
-const int weight_regular_sync = 10*60; // Sync every 10 minutes even if there is no change
+const int weight_change_sync       = 5000;            // Sync on change 5 seconds
+const int weight_regular_sync      = 60000*5;         // Sync at least every 5 minutes even if there is no change
+
+// Screensaver
+const int screensaver_timeout      = 60000*5;         // Run screensaver every 5 minutes
 
 // Output/input PIN settings
 const int LOADCELL_DOUT_PIN = 22;
@@ -32,27 +43,36 @@ const int BUTTON1PIN        = 35;
 const int BUTTON2PIN        = 0;
 
 // Graphics settings
-const int lcd_msg_text_spacing = 20;
-const int lcd_msg_text_top     = 10;
-const int lcd_msg_text_left    = 10;
-const int lcd_msg_dellay       = 1000;
-const int lcd_head_text_left   = 130;
-const int lcd_head_dellay      = 1000;
-const int lcd_width            = 240;
-const int lcd_height           = 135;
+const int lcd_head_first_top    = 25;
+const int lcd_head_second_top   = 60;
+const int lcd_head_text_left    = 125;
+const int lcd_head_dellay       = 1000;
+const int lcd_width             = 240;
+const int lcd_height            = 135;
+const int lcd_logo_beer_width   = 100;
+const int lcd_logo_beer_height  = 125;
+const int lcd_logo_conn_width   = 14;
+const int lcd_logo_conn_height  = 14;
+const int lcd_logo_conn_top     = 0;
+const int lcd_logo_conn_left    = 208;
+const int lcd_logo_conn_spacing = 4;
+enum lcd_logo_type { ONLINE, OFFLINE, SYNC, CLEAR };
 
 /*
  * Loop variables
  */
-int   lcd_text_offset     = lcd_msg_text_top; // Display text spacing
-bool  tara_next_run       = true;             // Should we do tara on the next run?
-bool  redraw_screen       = true;             // Should we redraw the screen with weight?
-float weight_offset       = 0;                // Offset saved from the last boot
-int   last_measure        = 0;                // Measured value change detection
-bool  measurement_changed = false;            // Detect if measured weight changed
-bool  measurement_send    = false;            // Should be a new measurement send?
-int   regular_sync        = 0;                // Counter if we should sync regulary
-int   change_sync         = 0;                // Counter if we should sync after change
+bool  tara_next_run             = true;             // Should we do tara on the next run?
+bool  redraw_screen             = true;             // Should we redraw the screen with weight?
+float weight_offset             = 0;                // Offset saved from the last boot
+int   last_measure              = 0;                // Measured value change detection
+bool  measurement_changed       = false;            // Detect if measured weight changed
+bool  measurement_send          = false;            // Should be a new measurement send?
+unsigned long last_change_sync  = 0;                // Value in miliseconds when was the last measured value update
+unsigned long wifi_last_conn    = 0;                // Value in miliseconds when was the last connection time for WiFi
+unsigned long mqtt_last_conn    = 0;                // Value in miliseconds when was the last connection time for MQTT
+unsigned long last_screensaver  = 0;                // Value in miliseconds when was the last screensaver run
+lcd_logo_type wifi_state        = lcd_logo_type::OFFLINE;
+lcd_logo_type mqtt_state        = lcd_logo_type::OFFLINE;
 
 /*
  * Display, scale, persistent storage and MQTT
@@ -70,79 +90,143 @@ String get_device_id() {
   return (String(mqtt_device)+chip_ip);
 }
 
-void set_lcd_newline() {
-  lcd_text_offset+=lcd_msg_text_spacing;
-  tft.setCursor(lcd_msg_text_left, lcd_text_offset, 2);
-}
-
-void clear_lcd_text() {
-  tft.fillRect(lcd_head_text_left, 0, lcd_width-lcd_head_text_left, lcd_height, TFT_BLACK);
-}
-
-bool connect_to_wifi() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(lcd_msg_text_left, lcd_text_offset, 2);
+void write_lcd_first(String text) {
+  tft.setCursor(lcd_head_text_left, lcd_head_first_top, 2);
   tft.setTextColor(TFT_WHITE,TFT_BLACK);
+  tft.setTextSize(2);
+  tft.println(text);
+}
+
+void write_lcd_second(String text) {
+  tft.setCursor(lcd_head_text_left, lcd_head_second_top, 2);
+  tft.setTextSize(3);
+  tft.println(text);
+}
+
+void update_lcd_text(bool show, float weight = 0) {
+  tft.fillRect(lcd_head_text_left, lcd_head_first_top, lcd_width-lcd_head_text_left, lcd_height-lcd_head_first_top, TFT_BLACK);
+  if (!show)
+    return;
+  write_lcd_first("Tapped:");
+  write_lcd_second(String(weight, 1));
+  tft.setCursor(lcd_head_text_left, 110, 2);
   tft.setTextSize(1);
-  tft.print("Connecting to: ");
-  tft.print(ssid);
-  set_lcd_newline();
-  WiFi.begin(ssid, password);
-  int connect_timeout = 10;
-  while (WiFi.status() != WL_CONNECTED && connect_timeout-- > 0) {
-      delay(500);
-      tft.print(".");
-  }
-  set_lcd_newline();
-  if (connect_timeout > 0) {
-    tft.print("CONNECTED");
-    delay(lcd_msg_dellay);
-    return true;
-  } else {
-    tft.print("CONN ERR!");
-    delay(lcd_msg_dellay);
-    return false;
-  }
+  tft.println("liters of beer");
 }
 
-bool diconnect_from_wifi() {
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
+void screensaver() {
   tft.fillScreen(TFT_BLACK);
-  tft.pushImage(0, 0, 125, 125, image_data_RGB);
-  lcd_text_offset = lcd_msg_text_top;
-  return true;
+  for (size_t pos_x = 0; pos_x < lcd_width; pos_x++) {
+    tft.pushImage(pos_x, 5, lcd_logo_beer_width, lcd_logo_beer_height, image_data_beer);
+    delay(25);
+    tft.fillRect(pos_x, 5, 1, lcd_logo_beer_height, TFT_BLACK);
+  }
+  redraw_screen = true;
+  update_lcd_graphics();
 }
 
-bool put_mqtt_message(String topic, String payload) {
-  pubsub_client.setServer(mqtt_broker, mqtt_port);
-  String client_id = get_device_id();
-  set_lcd_newline();
-  tft.print("Sending MQTT message:");
-  set_lcd_newline();
-  if (pubsub_client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
-      tft.print("CONNECTED");
-      delay(500);
-      pubsub_client.beginPublish(topic.c_str(), payload.length(), false);
+void draw_beer_logo(bool show) {
+  if (show)
+    tft.pushImage(0, 5, lcd_logo_beer_width, lcd_logo_beer_height, image_data_beer);
+  else
+    tft.fillRect(0, 5, lcd_logo_beer_width, lcd_logo_beer_height, TFT_BLACK);
+}
+
+void draw_wifi_logo(lcd_logo_type type) {
+  switch(type) {
+    case lcd_logo_type::ONLINE: {
+        tft.pushImage(lcd_logo_conn_left, lcd_logo_conn_top, lcd_logo_conn_width, lcd_logo_conn_height, image_data_wifi_online);
+      }
+      break;
+    case lcd_logo_type::OFFLINE: {
+        tft.pushImage(lcd_logo_conn_left, lcd_logo_conn_top, lcd_logo_conn_width, lcd_logo_conn_height, image_data_wifi_offline);
+      }
+      break;
+    case lcd_logo_type::SYNC: {
+        tft.pushImage(lcd_logo_conn_left, lcd_logo_conn_top, lcd_logo_conn_width, lcd_logo_conn_height, image_data_wifi_sync);
+      }
+      break;
+    case lcd_logo_type::CLEAR: {
+        tft.fillRect(lcd_logo_conn_left, lcd_logo_conn_top, lcd_logo_conn_width, lcd_logo_conn_height, TFT_BLACK);
+      }
+      break;
+  }
+}
+
+void draw_mqtt_logo(lcd_logo_type type) {
+  switch(type) {
+    case lcd_logo_type::ONLINE: {
+        tft.pushImage(lcd_logo_conn_left+lcd_logo_conn_width+lcd_logo_conn_spacing, lcd_logo_conn_top, lcd_logo_conn_width, lcd_logo_conn_height, image_data_mqtt_online);
+      }
+      break;
+    case lcd_logo_type::OFFLINE: {
+        tft.pushImage(lcd_logo_conn_left+lcd_logo_conn_width+lcd_logo_conn_spacing, lcd_logo_conn_top, lcd_logo_conn_width, lcd_logo_conn_height, image_data_mqtt_offline);
+      }
+      break;
+    case lcd_logo_type::SYNC: {
+        tft.pushImage(lcd_logo_conn_left+lcd_logo_conn_width+lcd_logo_conn_spacing, lcd_logo_conn_top, lcd_logo_conn_width, lcd_logo_conn_height, image_data_mqtt_sync);
+      }
+      break;
+    case lcd_logo_type::CLEAR: {
+        tft.fillRect(lcd_logo_conn_left+lcd_logo_conn_width+lcd_logo_conn_spacing, lcd_logo_conn_top, lcd_logo_conn_width, lcd_logo_conn_height, TFT_BLACK);
+      }
+      break;
+  }
+}
+
+void update_lcd_conn_graphics() {
+  draw_wifi_logo(wifi_state);
+  draw_mqtt_logo(mqtt_state);
+}
+
+void update_lcd_graphics() {
+  draw_beer_logo(true);
+  update_lcd_conn_graphics();
+}
+
+bool wifi_connect() {
+  WiFi.begin(ssid, password);
+  int connect_timeout = 50;
+  while (WiFi.status() != WL_CONNECTED && connect_timeout-- > 0) {
+      delay(100);
+  }
+  if (connect_timeout > 0) {
+    return true;
+  }
+  return false;
+}
+
+bool wifi_connected() {
+  return (WiFi.status() == WL_CONNECTED);
+}
+
+bool wifi_reconnect() {
+    WiFi.disconnect();
+    return WiFi.reconnect();
+}
+
+bool mqtt_connected() {
+  return pubsub_client.connected();
+}
+
+bool mqtt_reconnect() {
+  if (pubsub_client.connect(get_device_id().c_str(), mqtt_username, mqtt_password)) {
+    return true;
+  }
+  return false;
+}
+
+bool mqtt_put_message(String topic, String payload) {
+      pubsub_client.beginPublish(topic.c_str(), payload.length(), true);
       for (size_t pos = 0; pos <= payload.length(); pos+=64) {
           pubsub_client.print(payload.substring(pos,pos+64).c_str());
       }
-      int res = pubsub_client.endPublish();
-      pubsub_client.disconnect();
-      if (res == 1)
-        tft.print(" SENT");
-      else
-        tft.print(" ERR!");
-      delay(lcd_msg_dellay);
-      return (res == 1);
-  } else {
-      tft.print("CONN ERR!");
-      delay(lcd_msg_dellay);
-      return false;
-  }
+      return pubsub_client.endPublish();
 }
 
 bool send_device_registration() {
+  if (!mqtt_connected())
+    return false;
   String registration_json = R"({
    "device_class":"weight",
    "state_topic":"homeassistant/sensor/XXX/state",
@@ -164,34 +248,17 @@ bool send_device_registration() {
     }
   })";
   registration_json.replace("XXX",get_device_id());
-  return put_mqtt_message(String(mqtt_base_addr+get_device_id()+"/config"), registration_json);
+  return mqtt_put_message(String(mqtt_base_addr+get_device_id()+"/config"), registration_json);
 }
 
 bool send_device_state(float value) {
+  if (!mqtt_connected())
+    return false;
   String state_json = R"({
    "weight":XXX
   })";
   state_json.replace("XXX",String(value));
-  return put_mqtt_message(String(mqtt_base_addr+get_device_id()+"/state"), state_json);
-}
-
-bool connect_and_register() {
-  bool ret = false;
-  if (connect_to_wifi()) {
-    ret = send_device_registration();
-  }
-  diconnect_from_wifi();
-  return ret;
-}
-
-bool connect_and_send(float value) {
-  bool ret = false;
-  if (connect_to_wifi()) {
-    ret = send_device_state(value);
-  }
-  diconnect_from_wifi();
-  redraw_screen = true;
-  return ret;
+  return mqtt_put_message(String(mqtt_base_addr+get_device_id()+"/state"), state_json);
 }
 
 void IRAM_ATTR toggleButton1() {
@@ -207,8 +274,7 @@ void setup(void) {
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
-  tft.pushImage(0, 0, 125, 125, image_data_RGB);
-
+  update_lcd_graphics();
   Serial.begin(115200);
   Serial.println("Serial connection ready.");
 
@@ -231,25 +297,76 @@ void setup(void) {
   weight_offset = preferences.getFloat("weight", 0);
   Serial.println("Persistent storage loaded.");
 
-  // Register ourselves as a MQTT device, try max. 5 times
-  int connect_timeout = 5;
-  while (!connect_and_register() && connect_timeout-- > 0) {
-    delay(500);
+  write_lcd_first("Starting");
+  write_lcd_second("...");
+
+  // Setup WiFi connection
+  wifi_state = lcd_logo_type::SYNC;
+  update_lcd_conn_graphics();
+  if (wifi_connect()) {
+    wifi_state = lcd_logo_type::ONLINE;
+  } else {
+    wifi_state = lcd_logo_type::OFFLINE;
   }
+  update_lcd_conn_graphics();
+
+  // Setup MQTT connection
+  pubsub_client.setServer(mqtt_broker, mqtt_port);
+  if (wifi_connected()) {
+    mqtt_state = lcd_logo_type::SYNC;
+    update_lcd_conn_graphics();
+    mqtt_reconnect();
+    if (send_device_registration()) {
+      mqtt_state = lcd_logo_type::ONLINE;
+    } else {
+      mqtt_state = lcd_logo_type::OFFLINE;
+    }
+  }
+  update_lcd_conn_graphics();
 }
 
 void loop() {
+  // WiFi connection checks
+  // ----------------------
+  if (!wifi_connected()) {
+    wifi_state = lcd_logo_type::OFFLINE;
+    unsigned long current_time = millis();
+    if (current_time - wifi_last_conn >= reconnect_time) {
+      wifi_state = lcd_logo_type::SYNC;
+      update_lcd_conn_graphics();
+      wifi_reconnect();
+      wifi_last_conn = current_time;
+    }
+  } else {
+    wifi_state = lcd_logo_type::ONLINE;
+  }
+
+  // MQTT connection checks
+  // ----------------------
+  if (!mqtt_connected()) {
+    mqtt_state = lcd_logo_type::OFFLINE;
+    unsigned long current_time = millis();
+    if (current_time - mqtt_last_conn >= reconnect_time) {
+      mqtt_state = lcd_logo_type::SYNC;
+      update_lcd_conn_graphics();
+      mqtt_reconnect();
+      send_device_registration();
+      mqtt_last_conn = current_time;
+    }
+  } else {
+    mqtt_state = lcd_logo_type::ONLINE;
+  }
+
+  // Update LCD connections
+  update_lcd_conn_graphics();
+
   // If tara is wanted, do tara
   if (tara_next_run) {
-    clear_lcd_text();
-    tft.setCursor(lcd_head_text_left, 35, 2);
-    tft.setTextColor(TFT_WHITE,TFT_BLACK);
-    tft.setTextSize(2);
-    tft.println("Tara");
+    update_lcd_text(false);
+    write_lcd_first("Tara:");
     delay(lcd_head_dellay);
     scale.tare();
-    tft.setCursor(lcd_head_text_left, 70, 2);
-    tft.println("Done");
+    write_lcd_second("done");
     delay(lcd_head_dellay);
     tara_next_run = false;
     redraw_screen = true;
@@ -269,44 +386,37 @@ void loop() {
       redraw_screen = true;
     }
     if (redraw_screen) {
-      clear_lcd_text();
-      tft.setCursor(lcd_head_text_left, 15, 2);
-      tft.setTextColor(TFT_WHITE,TFT_BLACK);
-      tft.setTextSize(2);
-      tft.println("Tapped:");
-      tft.setCursor(lcd_head_text_left, 60, 2);
-      tft.setTextSize(3);
-      tft.println(String(rounded_weight, 1));
-      tft.setCursor(lcd_head_text_left, 110, 2);
-      tft.setTextSize(1);
-      tft.println("liters of beer");
+      update_lcd_text(true, rounded_weight);
       redraw_screen = false;
     }
-    change_sync++;
-    regular_sync++;
     if (measurement_changed) {
       preferences.putFloat("weight", weight);
       measurement_changed = false;
       measurement_send = true;
     }
-    if (((change_sync % weight_change_sync) == 0) && measurement_send) {
-      measurement_send = !connect_and_send(rounded_weight);
+    unsigned long current_time = millis();
+    if ((current_time - last_change_sync >= weight_change_sync) && measurement_send) {
+      measurement_send = !send_device_state(rounded_weight);
+      last_change_sync = current_time;
     }
-    if ((regular_sync % weight_regular_sync) == 0) {
-      connect_and_send(rounded_weight);
+    if (current_time - last_change_sync >= weight_regular_sync) {
+      send_device_state(rounded_weight);
+      last_change_sync = current_time;
     }
   } else {
-    clear_lcd_text();
-    tft.setCursor(lcd_head_text_left, 35, 2);
-    tft.setTextColor(TFT_WHITE,TFT_BLACK);
-    tft.setTextSize(2);
-    tft.println("Scale");
-    tft.setCursor(lcd_head_text_left, 70, 2);
-    tft.setTextColor(TFT_WHITE,TFT_BLACK);
-    tft.setTextSize(2);
-    tft.println("error :(");
+    update_lcd_text(false);
+    write_lcd_first("Scale");
+    write_lcd_second("err :(");
     redraw_screen = true;
   }
-  // Sleep until next measurement
-  delay(1000);
+  // Run MQTT rutines
+  pubsub_client.loop();
+  // Check if we should run OLED screensaver
+  unsigned long current_time = millis();
+  if (current_time - last_screensaver >= screensaver_timeout) {
+    screensaver();
+    last_screensaver = current_time;
+  }
+  // Sleep a while before the next run
+  delay(200);
 }
