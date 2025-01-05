@@ -237,13 +237,13 @@ bool send_device_registration() {
       "identifiers":[
           "XXX"
       ],
-      "name":"Beer weight",
+      "name":"Beer scale",
       "manufacturer": "Brewrobot sensors",
-      "model": "Beer weight sensor ESP32",
+      "model": "Beer scale weight sensor ESP32",
       "model_id": "A1",
       "serial_number": "00001",
       "hw_version": "1.00",
-      "sw_version": "2025.0.0",
+      "sw_version": "2025.1.1",
       "configuration_url": "https://github.com/melnijir/brewrobot-tap-weight"
     }
   })";
